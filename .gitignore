@@ -1,0 +1,41 @@
+# --- Build -----------------------------------------------------------------
+# Scripts/build.sh creates build/; the wildcard also covers side-by-side trees
+# such as build_cuda/ or build-debug/.
+build/
+build*/
+cmake-build*/
+
+# --- Run output ------------------------------------------------------------
+output/
+*.vtk
+*.ckpt
+
+# Per-step logs the solver writes to whatever directory it is launched from.
+# These are output, not source, and accumulate in the repository root.
+body_state*.csv
+ovr_trace.csv
+*.log
+
+# --- Assistant and editor tooling ------------------------------------------
+# Claude Code keeps its per-project state, settings and transcripts here.
+# None of it belongs in a scientific repository.
+.claude/
+.claude.json
+.mcp.json
+CLAUDE.md
+.aider*
+.cursor/
+.github/copilot-instructions.md
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+
+# --- Editors and OS --------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
