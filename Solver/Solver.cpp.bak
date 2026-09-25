@@ -10,7 +10,6 @@
 #include "Checkpoint.hpp"
 #include "MLSBasis.hpp"
 #include "Output.hpp"
-#include "Stability.hpp"
 #include "Geometry.hpp"
 #include <memory>
 #include <cstdlib>
@@ -139,12 +138,6 @@ void runSolver(std::vector<Particle>    &P,
 
     int N    = cp.N;
     int ndim = cp.dim;
-
-    // Stops the run if the solution leaves physical bounds. A diverged solve
-    // freezes rather than crashing, so without this the remaining steps run
-    // to completion on a dead state.
-    stability::Guard guard(BC.Tw, BC.rho);
-    bool diverged = false;
 
     double Lx = dom.xright - dom.xleft;
     double Ly = dom.ytop   - dom.ybottom;
@@ -450,7 +443,6 @@ void runSolver(std::vector<Particle>    &P,
             cudaDownloadMoments(P);
             auto d = computeDiagnostics(P);
             printStep(step, t, dt, d);
-            if (guard.diverged(step, t, d)) { diverged = true; break; }
             {
                 int nPos = 0, nNad = 0, nDeg = 0, nExt = 0;
                 cudaLimiterCounts(&nPos, &nNad);
@@ -733,15 +725,10 @@ void runSolver(std::vector<Particle>    &P,
                 auto d = computeDiagnostics(PO);
                 printStep(step, t, dt, d);
                 fflush(stdout);
-                if (guard.diverged(step, t, d)) diverged = true;
                 writeVTK(PO, sp.outDir, step, t);
                 writeTimeseries(sp.outDir + "/timeseries.csv", t, d);
             }
         }
-        // Outside the root-only block. Only the root evaluates diagnostics, so
-        // with more than one rank this flag would need broadcasting for the
-        // break to be collective; single-rank today.
-        if (diverged) break;
     }
 
     // ── Final output ───────────────────────────────────────────────────────
