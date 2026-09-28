@@ -130,6 +130,10 @@ int main(int argc, char *argv[])
 
     BodyMotion motion = BodyMotion::Free;
     double argNx = -1, argNv = -1, argDt = -1, argTf = -1, bodyScale = 1.0;
+    // --estimate: time step 2 (step 1 carries warm-up) and project the whole
+    // run from it. 0 = print the projection and stop there; 1 = print it and
+    // run to tfinal. Left at -1 the instrumentation is off.
+    double argEstimate = -1;
     std::string tag;
 
     for (int i = 2; i < argc; ++i)
@@ -142,6 +146,7 @@ int main(int argc, char *argv[])
         else if (a == "--dt")         ok = nextValue(argc, argv, i, &argDt);
         else if (a == "--tfinal")     ok = nextValue(argc, argv, i, &argTf);
         else if (a == "--body-scale") ok = nextValue(argc, argv, i, &bodyScale);
+        else if (a == "--estimate")   ok = nextValue(argc, argv, i, &argEstimate);
         else if (a == "--tag")
         {
             if (i + 1 >= argc) { ok = false; }
@@ -177,6 +182,7 @@ int main(int argc, char *argv[])
     sp.problem = ProblemID::DrivenCavity;   // shared initial state for all six
 
     // Command-line overrides, applied after the case defaults.
+    if (argEstimate >= 0) sp.estimateFlag = int(argEstimate);
     if (argNx > 0)
     {
         sp.Nx = sp.Ny = int(argNx);
