@@ -104,10 +104,16 @@ bool nextValue(int argc, char **argv, int &i, double *out)
 
 int main(int argc, char *argv[])
 {
+#ifdef ALEBGK_WITH_MPI
+    MPI_Init(&argc, &argv);
+#endif
     if (argc < 2)
     {
         std::printf("Usage: alebgk <case> [options]\n");
         listCases();
+#ifdef ALEBGK_WITH_MPI
+        MPI_Finalize();
+#endif
         return 1;
     }
 
@@ -116,6 +122,9 @@ int main(int argc, char *argv[])
     {
         std::printf("Unknown case '%s'.\n", argv[1]);
         listCases();
+#ifdef ALEBGK_WITH_MPI
+        MPI_Finalize();
+#endif
         return 1;
     }
 
@@ -142,11 +151,17 @@ int main(int argc, char *argv[])
         {
             std::printf("Unknown option '%s'.\n", a.c_str());
             listCases();
+#ifdef ALEBGK_WITH_MPI
+            MPI_Finalize();
+#endif
             return 1;
         }
         if (!ok)
         {
             std::printf("Option '%s' needs a value.\n", a.c_str());
+#ifdef ALEBGK_WITH_MPI
+            MPI_Finalize();
+#endif
             return 1;
         }
     }
@@ -200,6 +215,9 @@ int main(int argc, char *argv[])
     {
         std::printf("Not enough memory for this configuration. "
                     "Reduce --Nx or --Nv.\n");
+#ifdef ALEBGK_WITH_MPI
+        MPI_Finalize();
+#endif
         return 1;
     }
 
@@ -232,5 +250,8 @@ int main(int argc, char *argv[])
     const double total = std::chrono::duration<double>(
         std::chrono::high_resolution_clock::now() - t0).count();
     std::printf("Total wall time: %.2f s\n", total);
+#ifdef ALEBGK_WITH_MPI
+    MPI_Finalize();
+#endif
     return 0;
 }

@@ -11,9 +11,18 @@ cmake_minimum_required(VERSION 3.18)
 # backend runs the same cases and is the reference for cross-checking.
 # =============================================================================
 option(ALEBGK_CUDA      "Build the CUDA backend"                OFF)
+option(ALEBGK_MPI       "Build the MPI backend (rank-parallel CPU)" OFF)
+option(ALEBGK_INTEL_MPI "Build the MPI backend against Intel MPI"  OFF)
 option(ALEBGK_OPENMP    "OpenMP threading on the host"          ON)
 option(ALEBGK_NATIVE    "Optimize for the build machine"        ON)
 option(ALEBGK_FAST_MATH "Fast math (UNSAFE for validation)"     OFF)
+
+if(ALEBGK_INTEL_MPI)
+    set(ALEBGK_MPI ON)
+endif()
+if(ALEBGK_MPI AND ALEBGK_CUDA)
+    message(FATAL_ERROR "ALEBGK_MPI and ALEBGK_CUDA are mutually exclusive")
+endif()
 
 if(ALEBGK_CUDA)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
@@ -61,6 +70,7 @@ set(SOURCES
     RigidBody/BodyDynamics.cpp
     RigidBody/CloudManagement.cpp
     Solver/Solver.cpp
+    Solver/MpiExchange.cpp
 )
 if(ALEBGK_CUDA)
     list(APPEND SOURCES Solver/CudaBackend.cu)
@@ -77,11 +87,39 @@ target_include_directories(alebgk PRIVATE
     TestCases
 )
 
+if(ALEBGK_MPI)
+    if(ALEBGK_INTEL_MPI AND NOT DEFINED ENV{I_MPI_ROOT})
+        message(FATAL_ERROR "ALEBGK_INTEL_MPI=ON but I_MPI_ROOT is not set. "
+                "Load the oneAPI environment first.")
+    endif()
+    if(ALEBGK_INTEL_MPI AND WIN32)
+        # CMake FindMPI probes a legacy intel64/ tree that oneAPI 2024+
+        # no longer ships, so link Intel MPI directly from I_MPI_ROOT.
+        set(_IMPI "$ENV{I_MPI_ROOT}")
+        find_path(ALEBGK_IMPI_INCLUDE mpi.h
+            HINTS "${_IMPI}/include" "${_IMPI}/intel64/include" NO_DEFAULT_PATH)
+        find_library(ALEBGK_IMPI_LIBRARY impi
+            HINTS "${_IMPI}/lib" "${_IMPI}/lib/release"
+                  "${_IMPI}/intel64/lib/release" NO_DEFAULT_PATH)
+        if(NOT ALEBGK_IMPI_INCLUDE OR NOT ALEBGK_IMPI_LIBRARY)
+            message(FATAL_ERROR "Intel MPI not found under ${_IMPI}")
+        endif()
+        target_include_directories(alebgk PRIVATE "${ALEBGK_IMPI_INCLUDE}")
+        target_link_libraries(alebgk PRIVATE "${ALEBGK_IMPI_LIBRARY}")
+        message(STATUS "Backend: MPI (Intel MPI direct)")
+    else()
+        find_package(MPI REQUIRED)
+        target_link_libraries(alebgk PRIVATE MPI::MPI_CXX)
+        message(STATUS "Backend: MPI")
+    endif()
+    target_compile_definitions(alebgk PRIVATE ALEBGK_WITH_MPI)
+endif()
+
 if(ALEBGK_CUDA)
     target_compile_definitions(alebgk PRIVATE ALEBGK_WITH_CUDA)
     set_target_properties(alebgk PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
     message(STATUS "Backend: CUDA (arch ${CMAKE_CUDA_ARCHITECTURES})")
-else()
+elseif(NOT ALEBGK_MPI)
     message(STATUS "Backend: serial CPU")
 endif()
 

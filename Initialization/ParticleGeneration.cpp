@@ -14,6 +14,19 @@
 #include <vector>
 #include <algorithm>
 
+#ifdef ALEBGK_WITH_MPI
+// Implemented in Solver/MpiExchange.cpp. Declared here rather than in a
+// header because the slab decomposition is an implementation detail of the
+// MPI backend: generation needs to know which rows this rank owns, nothing
+// else does.
+void alebgk_decompPlan(int rowsTotal, long long rowStride, bool axisPeriodic,
+                       double axisSpacing, double radius, int dim,
+                       bool problemEligible);
+bool alebgk_decompKeep(long long globalIdx);
+void alebgk_decompTrim(std::vector<Particle> &P);
+#endif
+
+
 void generateParticles(std::vector<Particle> &P,
                        const SimParameters   &sp,
                        const DomainBoundary  &dom,
