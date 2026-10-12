@@ -139,12 +139,13 @@ if defined NP (
 if errorlevel 1 goto :run_failed
 
 rem Report the mode the solver actually chose, not the one predicted above,
-rem so a sweep that silently changed mode is visible.
+rem so a sweep that silently changed mode is visible.  Not named MODE: that
+rem is already this script's smoke/production/estimate argument.
+set "DECOMPLINE="
 for /f "tokens=1,* delims=:" %%A in ('findstr /c:"Decomp:" "%LOG%"') do (
-    if not defined MODE set "MODE=%%B"
+    if not defined DECOMPLINE set "DECOMPLINE=%%B"
 )
-if defined MODE echo    !MODE!
-set "MODE="
+if defined DECOMPLINE echo    !DECOMPLINE!
 
 set "LINE="
 for /f "tokens=* usebackq delims=" %%L in (`findstr /c:"[ESTIMATE]" "%LOG%"`) do (
