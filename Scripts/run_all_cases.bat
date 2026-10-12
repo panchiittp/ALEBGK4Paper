@@ -112,13 +112,20 @@ for /f "tokens=* usebackq" %%M in (`powershell -NoProfile -Command ^
   "$d=%DIM%; $nx=%NX%; $nv=%NV%; if($d -eq 2){$b=32.0*$nx*$nx*$nv*$nv}else{$b=16.0*[double]$nx*$nx*$nx*$nv*$nv*$nv}; '{0:N2}' -f ($b/1GB)"`) do set "MEM=%%M"
 
 echo.
-echo --- %CASE%  Nx=%NX%  Nv=%NV%  (cloud %MEM% GiB per replicated rank) ---
+echo --- %CASE%  Nx=%NX%  Nv=%NV%  (whole cloud %MEM% GiB) ---
 if defined NP (
-    rem The startup check in main.cpp sizes one rank against the whole node,
-    rem so a replicated run can pass it and still be OOM-killed.
-    for /f "tokens=* usebackq" %%A in (`powershell -NoProfile -Command ^
-      "'{0:N1}' -f ([double]'%MEM%'.Replace(',','') * %NP%)"`) do (
-        echo     replicated: %%A GiB across %NP% ranks on one node
+    rem Slab mode needs two halo widths of owned rows per rank, so the smallest
+    rem slab must be at least 2*4 = 8 rows.  Below that the code replicates the
+    rem whole cloud on every rank, and the startup check in main.cpp sizes one
+    rem rank against the whole node, so such a run passes it and is OOM-killed.
+    for /f "tokens=* usebackq delims=" %%A in (`powershell -NoProfile -Command ^
+      "$m=[double]('%MEM%'.Replace(',','')); $p=%NP%; $nx=%NX%; $mr=[math]::Floor($nx/$p);" ^
+      "if ($mr -ge 8) { $per=$m*(1.0/$p+8.0/$nx);" ^
+      "  'slab mode: {0} rows/rank, {1:N2} GiB per rank, {2:N1} GiB total' -f $mr,$per,($per*$p) }" ^
+      "else {" ^
+      "  'SLAB INELIGIBLE: {0} rows/rank, 8 required; falls back to replicated' -f $mr;" ^
+      "  '{0:N1} GiB across {1} ranks on one node; expect an OOM kill. Use -n {2} or fewer.' -f ($m*$p),$p,[math]::Floor($nx/8) }"`) do (
+        echo     %%A
     )
 )
 

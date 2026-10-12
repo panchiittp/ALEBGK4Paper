@@ -66,6 +66,12 @@ inline int mpiSize()
 extern bool decompOn;
 extern int  decompLo, decompHi;
 
+/* Set by --slab (or ALEBGK_DECOMP=2): the run must use the slab
+   decomposition, and aborts rather than falling back to the replicated
+   cloud.  The fallback is silent and costs ranksPerNode times the memory,
+   so a study that assumes slab mode wants to fail loudly instead. */
+extern bool requireDecomp;
+
 /* This rank's chunk [lo, hi) of an N-element particle array. */
 inline void chunk(int N, int *lo, int *hi)
 {

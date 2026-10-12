@@ -97,12 +97,26 @@ if [ "$MODE" = "estimate" ]; then
         log="$LOGDIR/${tag}${NP:+_np$NP}_${STAMP}.log"
 
         echo
-        echo "--- $case  Nx=$nx  Nv=$nv  (cloud ${mem} GiB per replicated rank) ---"
+        echo "--- $case  Nx=$nx  Nv=$nv  (whole cloud ${mem} GiB) ---"
         if [ -n "$NP" ]; then
-            # The startup check in main.cpp sizes one rank against the whole
-            # node, so a replicated run can pass it and still be OOM-killed.
-            awk -v m="$mem" -v p="$NP" 'BEGIN{
-                printf "    replicated: %.1f GiB across %d ranks on one node\n", m*p, p }'
+            # Slab mode needs two halo widths of owned rows per rank, so the
+            # smallest slab must be at least 2*4 = 8 rows. Below that the code
+            # falls back to replicating the whole cloud on every rank, and the
+            # startup check in main.cpp sizes one rank against the whole node,
+            # so such a run passes it and is then OOM-killed.
+            awk -v m="$mem" -v p="$NP" -v nx="$nx" 'BEGIN{
+                minrows = int(nx / p);
+                if (minrows >= 8) {
+                    per = m * (1.0 / p + 8.0 / nx);
+                    printf "    slab mode: %d rows/rank, %.2f GiB per rank, %.1f GiB total\n",
+                           minrows, per, per * p;
+                } else {
+                    printf "    SLAB INELIGIBLE: %d rows/rank, 8 required -> replicated fallback\n",
+                           minrows;
+                    printf "    %.1f GiB across %d ranks on one node; expect an OOM kill. Use -n %d or fewer.\n",
+                           m * p, p, int(nx / 8);
+                }
+            }'
         fi
 
         if "${LAUNCH[@]}" "$BIN" "$case" --Nx "$nx" --Nv "$nv" --estimate 0 \

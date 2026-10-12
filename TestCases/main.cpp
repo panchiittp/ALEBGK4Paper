@@ -38,6 +38,12 @@ void runSolver(std::vector<Particle> &P, const SimParameters &sp,
                const BoundaryConditions &BC, CalcParameters &cp,
                std::vector<std::unique_ptr<RigidBody>> &bodies);
 
+#ifdef ALEBGK_WITH_MPI
+// Pre-flight queries for the startup memory check (Solver/MpiExchange.cpp).
+int  alebgk_ranksPerNode();
+bool alebgk_decompWillEngage(int rowsTotal, bool problemEligible);
+#endif
+
 namespace {
 
 double availableMemoryGB()
@@ -85,6 +91,9 @@ void listCases()
         "  --dt T           time step, s\n"
         "  --tfinal T       final time, s\n"
         "  --body-scale S   scale the body's linear size (1.0 = reference)\n"
+        "  --estimate N     project the whole run from step 2; 0 = stop there\n"
+        "  --slab           require the slab decomposition under MPI and abort\n"
+        "                   rather than fall back to a replicated cloud\n"
         "  --tag NAME       suffix for the output directory\n\n"
         "Example:  alebgk cavity3d-cube --Nx 50 --tfinal 1.8e-7\n\n");
 }
@@ -136,11 +145,14 @@ int main(int argc, char *argv[])
     double argEstimate = -1;
     std::string tag;
 
+    bool requireSlab = false;
+
     for (int i = 2; i < argc; ++i)
     {
         const std::string a = argv[i];
         bool ok = true;
-        if      (a == "--fixed")      motion = BodyMotion::Fixed;
+        if      (a == "--slab")       requireSlab = true;
+        else if (a == "--fixed")      motion = BodyMotion::Fixed;
         else if (a == "--Nx")         ok = nextValue(argc, argv, i, &argNx);
         else if (a == "--Nv")         ok = nextValue(argc, argv, i, &argNv);
         else if (a == "--dt")         ok = nextValue(argc, argv, i, &argDt);
@@ -197,8 +209,37 @@ int main(int argc, char *argv[])
     if (!tag.empty()) sp.outDir += "_" + tag;
 
     const long N = long(sp.Nx) * sp.Ny * (info.dim == 3 ? sp.Nz : 1);
-    const double needGB = requiredMemoryGB(N, sp.Nv, info.dim);
-    const double haveGB = availableMemoryGB();
+    const double cloudGB = requiredMemoryGB(N, sp.Nv, info.dim);
+    const double haveGB  = availableMemoryGB();
+
+    // What this node is actually asked for. Under MPI the figure above is one
+    // rank's view of the cloud; in replicated mode every rank sharing the node
+    // allocates it again, so the node needs ranksPerNode times as much.
+    // Comparing one rank's share against the whole node lets a collectively
+    // oversized run start, and the OOM killer then takes every rank with
+    // signal 9 and no diagnostic of its own.
+    const int  rows        = (info.dim == 3) ? sp.Nz : sp.Ny;
+    int        ranksPerNode = 1;
+    bool       decomposed   = false;
+    double     needGB       = cloudGB;
+#ifdef ALEBGK_WITH_MPI
+    // --slab, or ALEBGK_DECOMP=2 for job scripts that cannot edit the command
+    // line. Read before generateParticles so alebgk_decompPlan sees it.
+    {
+        const char *env = std::getenv("ALEBGK_DECOMP");
+        alebgk::requireDecomp = requireSlab || (env && env[0] == '2');
+    }
+    ranksPerNode = alebgk_ranksPerNode();
+    decomposed   = alebgk_decompWillEngage(
+                       rows, sp.velMode == VelGridMode::Fixed && !sp.movingBodies);
+    if (decomposed)
+        // Owned rows plus a four-row halo per side. The halo is duplicated, so
+        // this is above cloudGB / P.
+        needGB = cloudGB * (1.0 / alebgk::mpiSize() + 8.0 / double(rows))
+                 * ranksPerNode;
+    else
+        needGB = cloudGB * ranksPerNode;
+#endif
 
     std::printf("\n==============================================\n");
     std::printf("  ALE-BGK meshfree kinetic solver\n");
@@ -211,16 +252,78 @@ int main(int argc, char *argv[])
                 sp.Nx, info.dim, sp.Nv);
     std::printf("  Time:   dt = %.3e s, tfinal = %.3e s (%ld steps)\n",
                 sp.dt, sp.tfinal, long(sp.tfinal / sp.dt + 0.5));
+#ifdef ALEBGK_WITH_MPI
+    std::printf("  Ranks:  %d total, %d on this node\n",
+                alebgk::mpiSize(), ranksPerNode);
+    if (alebgk::mpiSize() > 1)
+        std::printf("  Decomp: %s%s\n",
+                    decomposed ? "SLAB (owned rows + 4 ghost rows per side)"
+                               : "REPLICATED (every rank holds the whole cloud)",
+                    alebgk::requireDecomp ? "   [--slab: required]" : "");
+    std::printf("  Memory: ~%.2f GB per cloud, ~%.2f GB needed on this node",
+                cloudGB, needGB);
+#else
     std::printf("  Memory: ~%.2f GB needed", needGB);
+#endif
     if (haveGB > 0) std::printf(", %.2f GB available", haveGB);
     std::printf("\n  Output: %s\n", sp.outDir.c_str());
     std::printf("==============================================\n\n");
     std::fflush(stdout);
 
+#ifdef ALEBGK_WITH_MPI
+    // Refuse before the memory check, so --slab reports the decomposition as
+    // the reason rather than the replicated footprint it would have caused.
+    // alebgk_decompPlan repeats this with the exact row counts, as the
+    // authoritative test; this is the early, clearer exit.
+    if (alebgk::requireDecomp && alebgk::mpiSize() > 1 && !decomposed)
+    {
+        if (ALEBGK_ROOT)
+        {
+            std::printf("--slab was given but the slab decomposition is not "
+                        "available for this configuration.\n");
+            std::printf("It needs at least 8 owned rows per rank; %d rows "
+                        "across %d ranks gives %d. Use -n %d or fewer, or drop "
+                        "--slab to run replicated.\n",
+                        rows, alebgk::mpiSize(), rows / alebgk::mpiSize(),
+                        rows / 8);
+        }
+        MPI_Finalize();
+        return 2;
+    }
+#endif
+
     if (haveGB > 0 && needGB > haveGB)
     {
-        std::printf("Not enough memory for this configuration. "
-                    "Reduce --Nx or --Nv.\n");
+        if (ALEBGK_ROOT)
+        {
+            std::printf("Not enough memory for this configuration: this node "
+                        "needs ~%.2f GB but has %.2f GB.\n", needGB, haveGB);
+#ifdef ALEBGK_WITH_MPI
+            if (!decomposed && ranksPerNode > 1)
+            {
+                // The usual cause: too many ranks for the slab decomposition,
+                // so each one keeps a full copy. Fewer ranks is both the fix
+                // and a smaller footprint, which is counter-intuitive enough
+                // to be worth spelling out.
+                std::printf("The slab decomposition is not active, so each of "
+                            "the %d ranks on this node holds the whole %.2f GB "
+                            "cloud.\n", ranksPerNode, cloudGB);
+                const int pMax = rows / 8;          // largest eligible count
+                if (pMax >= 2)
+                    std::printf("It needs at least 8 owned rows per rank, so "
+                                "with %d rows use -n %d or fewer; each rank "
+                                "then holds about %.2f GB.\n",
+                                rows, pMax,
+                                cloudGB * (1.0 / pMax + 8.0 / double(rows)));
+                else
+                    std::printf("It needs at least 8 owned rows per rank, and "
+                                "%d rows cannot be split that way, so this "
+                                "case is single-rank only.\n", rows);
+            }
+            else
+#endif
+                std::printf("Reduce --Nx or --Nv.\n");
+        }
 #ifdef ALEBGK_WITH_MPI
         MPI_Finalize();
 #endif

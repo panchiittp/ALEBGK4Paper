@@ -141,7 +141,10 @@ void syncParticles(std::vector<Particle> &P)
 // identical there too.
 // =============================================================================
 
-namespace alebgk { bool decompOn = false; int decompLo = 0, decompHi = 0; }
+namespace alebgk {
+bool decompOn = false; int decompLo = 0, decompHi = 0;
+bool requireDecomp = false;
+}
 
 namespace
 {
@@ -167,6 +170,52 @@ struct DecompState
     std::vector<int> outCounts, outDispls;
 } S;
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Pre-flight helpers for the startup memory check in main.cpp.
+//
+// That check runs before any large allocation and therefore before
+// alebgk_decompPlan has been called, so it cannot ask the decomposition what
+// it is about to do. These two answer the only questions it needs: how many
+// ranks share this node, and whether the slab path will be taken.
+// ---------------------------------------------------------------------------
+
+// Ranks sharing physical memory with this one. Replicated mode allocates the
+// whole cloud once per rank, so this is the multiplier on the node's demand.
+int alebgk_ranksPerNode()
+{
+    MPI_Comm node = MPI_COMM_NULL;
+    if (MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0,
+                            MPI_INFO_NULL, &node) != MPI_SUCCESS)
+        return alebgk::mpiSize();        // conservative: assume a single node
+    int n = 1;
+    MPI_Comm_size(node, &n);
+    MPI_Comm_free(&node);
+    return n;
+}
+
+// Mirrors the eligibility test inside alebgk_decompPlan. The halo is
+// ceil(radius / axisSpacing) + 1; for the uniform clouds these cases generate
+// the radius is 2.5 times the spacing, giving 4 ghost rows and a minimum owned
+// slab of 2 * 4 = 8 rows. Keep in step with cp.radius in
+// ParticleGeneration.cpp if that factor ever changes.
+bool alebgk_decompWillEngage(int rowsTotal, bool problemEligible)
+{
+    const char *env = std::getenv("ALEBGK_DECOMP");
+    if (!problemEligible || (env && env[0] == '0')) return false;
+
+    const int n = alebgk::mpiSize();
+    if (n <= 1) return false;
+
+    int minRows = rowsTotal;
+    for (int q = 0; q < n; ++q)
+    {
+        const int lo = static_cast<int>(static_cast<long long>(q) * rowsTotal / n);
+        const int hi = static_cast<int>(static_cast<long long>(q + 1) * rowsTotal / n);
+        minRows = std::min(minRows, hi - lo);
+    }
+    return minRows >= 8;
+}
 
 // Called from generateParticles once the lattice geometry is known and
 // BEFORE the particle loop, so g allocation can be skipped for rows this
@@ -204,6 +253,32 @@ void alebgk_decompPlan(int rowsTotal, long long rowStride, bool axisPeriodic,
                  && minRows >= 2 * S.haloRows;
     if (!S.eligible)
     {
+        // --slab / ALEBGK_DECOMP=2: refuse the fallback. It is silent and
+        // multiplies memory by the ranks per node, so a study that assumes
+        // slab mode must not quietly get replicated numbers instead.
+        if (alebgk::requireDecomp && n > 1)
+        {
+            if (ALEBGK_ROOT)
+            {
+                printf("\n[decomp] ABORT: slab decomposition was required but "
+                       "is not available.\n");
+                if (envOff)
+                    printf("[decomp] ALEBGK_DECOMP=0 disables it; drop that to "
+                           "use --slab.\n");
+                else if (!problemEligible)
+                    printf("[decomp] This case is not eligible: it needs a "
+                           "static cloud on a fixed velocity grid (body cases "
+                           "and the adaptive grid always replicate).\n");
+                else
+                    printf("[decomp] The smallest slab is %d rows and %d are "
+                           "required (2 halos of %d). With %d rows use -n %d "
+                           "or fewer.\n",
+                           minRows, 2 * S.haloRows, S.haloRows,
+                           rowsTotal, rowsTotal / (2 * S.haloRows));
+                fflush(stdout);
+            }
+            MPI_Abort(MPI_COMM_WORLD, 2);
+        }
         if (ALEBGK_ROOT && problemEligible && n > 1)
             printf("[decomp] replicated mode (%s)\n",
                    envOff ? "ALEBGK_DECOMP=0"
