@@ -19,6 +19,9 @@ rem Environment overrides:
 rem   NV2D=20   NV3D=20     velocity points per direction
 rem   NX2D="400 800"        override the 2-D resolution list
 rem   NX3D="20 40"          override the 3-D resolution list
+rem   SLAB=1                require the slab decomposition (passes --slab), so a
+rem                         configuration that would silently replicate fails
+rem                         instead; keeps every point of a sweep in one mode
 rem   MPIEXEC=<full path to mpiexec.exe>
 rem ===========================================================================
 setlocal enabledelayedexpansion
@@ -53,6 +56,9 @@ if not defined NV2D set "NV2D=20"
 if not defined NV3D set "NV3D=20"
 if not defined NX2D set "NX2D=400 600 800 1200 1600"
 if not defined NX3D set "NX3D=20 40 60 80"
+
+set "SLABFLAG="
+if defined SLAB set "SLABFLAG=--slab"
 
 set "LAUNCH="
 if defined NP (
@@ -129,8 +135,16 @@ if defined NP (
     )
 )
 
-%LAUNCH% "%BIN%" %CASE% --Nx %NX% --Nv %NV% --estimate 0 > "%LOG%" 2>&1
+%LAUNCH% "%BIN%" %CASE% --Nx %NX% --Nv %NV% %SLABFLAG% --estimate 0 > "%LOG%" 2>&1
 if errorlevel 1 goto :run_failed
+
+rem Report the mode the solver actually chose, not the one predicted above,
+rem so a sweep that silently changed mode is visible.
+for /f "tokens=1,* delims=:" %%A in ('findstr /c:"Decomp:" "%LOG%"') do (
+    if not defined MODE set "MODE=%%B"
+)
+if defined MODE echo    !MODE!
+set "MODE="
 
 set "LINE="
 for /f "tokens=* usebackq delims=" %%L in (`findstr /c:"[ESTIMATE]" "%LOG%"`) do (

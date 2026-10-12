@@ -23,6 +23,9 @@
 #   NV2D=20   NV3D=20     velocity points per direction
 #   NX2D="400 800"        override the 2-D resolution list
 #   NX3D="20 40"          override the 3-D resolution list
+#   SLAB=1                require the slab decomposition (passes --slab), so a
+#                         configuration that would silently replicate fails
+#                         instead; keeps every point of a sweep in one mode
 #   MPIRUN=/path/to/mpirun
 # =============================================================================
 set -euo pipefail
@@ -57,8 +60,14 @@ if [ "$MODE" = "estimate" ]; then
 
     NV2D="${NV2D:-20}"
     NV3D="${NV3D:-20}"
-    read -r -a NX2D <<< "${NX2D:-400 600 800 1200 1600}"
-    read -r -a NX3D <<< "${NX3D:-20 40 60 80}"
+    # ${VAR-default}, not ${VAR:-default}: an explicitly empty NX2D="" then
+    # skips that dimension instead of falling back to the full list.
+    read -r -a NX2D <<< "${NX2D-400 600 800 1200 1600}"
+    read -r -a NX3D <<< "${NX3D-20 40 60 80}"
+
+    # Either empty or exactly "--slab", so an unquoted expansion is safe.
+    SLABFLAG=""
+    [ -n "${SLAB:-}" ] && SLABFLAG="--slab"
 
     LAUNCH=()
     if [ -n "$NP" ]; then
@@ -119,8 +128,12 @@ if [ "$MODE" = "estimate" ]; then
             }'
         fi
 
-        if "${LAUNCH[@]}" "$BIN" "$case" --Nx "$nx" --Nv "$nv" --estimate 0 \
-               > "$log" 2>&1; then
+        if "${LAUNCH[@]}" "$BIN" "$case" --Nx "$nx" --Nv "$nv" \
+               $SLABFLAG --estimate 0 > "$log" 2>&1; then
+            # Report the mode the solver actually chose, not the one predicted
+            # above, so a sweep that silently changed mode is visible.
+            mode="$(grep -m1 'Decomp:' "$log" || true)"
+            [ -n "$mode" ] && echo "   ${mode#*Decomp: }"
             line="$(grep -m1 '\[ESTIMATE\]' "$log" || true)"
             if [ -n "$line" ]; then
                 printf '%-26s Nv=%-3s %s\n' "$tag" "$nv" \
