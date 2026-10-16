@@ -603,9 +603,36 @@ void runSolver(std::vector<Particle>    &P,
         if (ALEBGK_ROOT)
             writeVTK(PO, sp.outDir, 0, 0.0);
     }
+    // ── Per-stage step profile (ALEBGK_MPI_PROFILE=1) ─────────────────────
+    // The CPU/MPI counterpart of the CUDA kernel profile. Wall time on this
+    // rank, accumulated per stage and reported as a mean per step. The rank
+    // exchange is timed at its call site rather than inside MpiExchange.cpp,
+    // so the figure includes time spent waiting for a slower neighbour:
+    // load imbalance then surfaces as exchange cost, which is where a reader
+    // of the table would look for it. Rank 0 reports the mean over ranks and
+    // the maximum, because a mean alone hides that imbalance.
+    enum { PF_TRANS = 0, PF_MASS, PF_GRAV, PF_BC, PF_MOM, PF_COLL,
+           PF_MOOD, PF_EXCH, PF_N };
+    static const char *pfName[PF_N] = {
+        "MLS semi-Lagrangian transport", "Global mass correction",
+        "Body force", "Boundary conditions", "Moments",
+        "Implicit BGK collision", "MOOD admissibility", "Rank exchange" };
+    double pfT[PF_N] = { 0.0 };
+    long   pfSteps = 0;
+    const char *pfEnv = std::getenv("ALEBGK_MPI_PROFILE");
+    const bool  pfOn  = (pfEnv && pfEnv[0] == '1');
+    using pfClock = std::chrono::high_resolution_clock;
+    auto pfNow = [] { return pfClock::now(); };
+    auto pfAdd = [&](int slot, pfClock::time_point t0) {
+        if (pfOn)
+            pfT[slot] += std::chrono::duration<double>(
+                             pfClock::now() - t0).count();
+    };
+
     while (t < sp.tfinal)
     {
         dt = std::min(dt, sp.tfinal - t);
+        auto p0 = pfNow();
 
         // 1. MLS semi-Lagrangian transport (Jacobi: all gt from old g).
         //    On periodic domains the stencil wraps via minimum image.
@@ -618,27 +645,41 @@ void runSolver(std::vector<Particle>    &P,
                 mlsTransportCompute(P, dt, cp, dom, BC, 1, true);
         }
         mlsTransportCommit(P);
+        pfAdd(PF_TRANS, p0);
+        p0 = pfNow();
         double massNew = sumMass(P);
 
         // 2. Global mass correction
         if (massNew > 1.0e-30)
             scaleG(P, massOld / massNew);
+        pfAdd(PF_MASS, p0);
+        p0 = pfNow();
 
         // 3. Body force (gravity): exact velocity-space advection split
         applyGravity(P, sp.gravityY, dt);
+        pfAdd(PF_GRAV, p0);
+        p0 = pfNow();
 
         // 4. Boundary conditions on wall particles (periodic closure lives
         //    in the transport stencil; fully periodic domains have none)
         applyBoundaryBC(P, gc.R, dom, BC);
+        pfAdd(PF_BC, p0);
+        p0 = pfNow();
 
         // 5. Compute moments from transported + BC-corrected distribution
         computeMoments(P, gc.R);
+        pfAdd(PF_MOM, p0);
+        p0 = pfNow();
 
         // 6. Implicit BGK collision (L-stable for any dt/tao)
         bgkCollision(P, dt, sp.tao, gc.R, sp.tauVariable, sp.d);
+        pfAdd(PF_COLL, p0);
+        p0 = pfNow();
 
         // 7. Update moments after collision
         computeMoments(P, gc.R);
+        pfAdd(PF_MOM, p0);
+        p0 = pfNow();
 
         // 8. MOOD admissibility check
         if (sp.limiter == LimiterMode::MOOD)
@@ -650,6 +691,8 @@ void runSolver(std::vector<Particle>    &P,
                 computeMoments(P, gc.R);
             }
         }
+        pfAdd(PF_MOOD, p0);
+        p0 = pfNow();
 
 #ifdef ALEBGK_WITH_MPI
         // One exchange per step. Decomposed mode: refresh only the ghost
@@ -660,6 +703,8 @@ void runSolver(std::vector<Particle>    &P,
         else
             syncParticles(P);
 #endif
+        pfAdd(PF_EXCH, p0);
+        if (pfOn) ++pfSteps;
 
         // 8b. Moving rigid bodies: stress-integrated forces, Newton-Euler
         //     update, rigid surface motion, then cloud management (remove
@@ -759,6 +804,48 @@ void runSolver(std::vector<Particle>    &P,
 
             printf("\nDone. Steps=%d  t=%.4e  Wall=%.2f s\n",
                    step, t, elapsed);
+        }
+    }
+
+    // ── Step profile report ───────────────────────────────────────────────
+    if (pfOn && pfSteps > 0)
+    {
+        double mean[PF_N], mx[PF_N];
+        for (int i = 0; i < PF_N; ++i)
+            mean[i] = pfT[i] / double(pfSteps) * 1000.0;   // ms per step
+        int nranks = 1;
+        const char *pfMode = "serial";
+#ifdef ALEBGK_WITH_MPI
+        nranks = alebgk::mpiSize();
+        pfMode = alebgk_decompActive() ? "slab decomposition"
+                                       : "replicated cloud";
+        double sum[PF_N];
+        MPI_Reduce(mean, sum, PF_N, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(mean, mx,  PF_N, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+        if (ALEBGK_ROOT)
+            for (int i = 0; i < PF_N; ++i) mean[i] = sum[i] / nranks;
+#else
+        for (int i = 0; i < PF_N; ++i) mx[i] = mean[i];
+#endif
+        if (ALEBGK_ROOT)
+        {
+            double tot = 0.0;
+            for (int i = 0; i < PF_N; ++i) tot += mean[i];
+            printf("\n=== CPU step profile: %d rank%s, %ld steps, %s ===\n",
+                   nranks, nranks == 1 ? "" : "s", pfSteps, pfMode);
+            printf("  %-32s %10s %10s %9s\n",
+                   "Component", "mean (ms)", "max (ms)", "share (%)");
+            for (int i = 0; i < PF_N; ++i)
+                printf("  %-32s %10.2f %10.2f %9.2f\n", pfName[i],
+                       mean[i], mx[i], tot > 0 ? 100.0 * mean[i] / tot : 0.0);
+            printf("  %-32s %10.2f %10.2f %9.2f\n",
+                   "Measured step", tot, tot, 100.0);
+            // max/mean on the exchange is the clearest imbalance signal: the
+            // slowest rank makes every other rank wait inside the exchange.
+            if (nranks > 1 && mean[PF_EXCH] > 0.0)
+                printf("  imbalance indicator: exchange max/mean = %.2f\n",
+                       mx[PF_EXCH] / mean[PF_EXCH]);
+            fflush(stdout);
         }
     }
 }
