@@ -60,6 +60,14 @@ if not defined NX3D set "NX3D=20 40 60 80"
 set "SLABFLAG="
 if defined SLAB set "SLABFLAG=--slab"
 
+rem PROFILE=1 swaps the cost estimate for a short real run with per-stage
+rem timing. --estimate is not used, since it stops at step 2 where warm-up
+rem still dominates; ten steps is enough for the means to settle.
+if defined PROFILE (
+    set "ALEBGK_MPI_PROFILE=1"
+    echo Profiling mode: ten time steps per configuration, --estimate off
+)
+
 set "LAUNCH="
 if defined NP (
     echo %NP%| findstr /r "^[1-9][0-9]*$" >nul
@@ -135,7 +143,12 @@ if defined NP (
     )
 )
 
-%LAUNCH% "%BIN%" %CASE% --Nx %NX% --Nv %NV% %SLABFLAG% --estimate 0 > "%LOG%" 2>&1
+rem Ten steps at the case default dt: 1e-13 in 2-D, 1e-11 in 3-D.
+set "MODEARGS=--estimate 0"
+if defined PROFILE if "%DIM%"=="3" set "MODEARGS=--tfinal 1e-10"
+if defined PROFILE if "%DIM%"=="2" set "MODEARGS=--tfinal 1e-12"
+
+%LAUNCH% "%BIN%" %CASE% --Nx %NX% --Nv %NV% %SLABFLAG% %MODEARGS% > "%LOG%" 2>&1
 if errorlevel 1 goto :run_failed
 
 rem Report the mode the solver actually chose, not the one predicted above,
@@ -146,6 +159,21 @@ for /f "tokens=1,* delims=:" %%A in ('findstr /c:"Decomp:" "%LOG%"') do (
     if not defined DECOMPLINE set "DECOMPLINE=%%B"
 )
 if defined DECOMPLINE echo    !DECOMPLINE!
+
+if defined PROFILE (
+    for /f "tokens=* usebackq delims=" %%L in (
+        `findstr /r /c:"CPU step profile" /c:"^  [A-Z]" /c:"imbalance" "%LOG%"`
+    ) do echo    %%L
+    set "EXCH="
+    for /f "tokens=3,5" %%A in ('findstr /c:"Rank exchange" "%LOG%"') do (
+        rem No parentheses here: inside this block they would need escaping
+        rem and the escape character leaks into the echoed text.
+        if not defined EXCH set "EXCH=exchange %%A ms = %%B%% of step"
+    )
+    if not defined EXCH set "EXCH=no profile produced"
+    >>"%SUMMARY%" echo %TAG%  Nv=%NV%  !EXCH!
+    exit /b 0
+)
 
 set "LINE="
 for /f "tokens=* usebackq delims=" %%L in (`findstr /c:"[ESTIMATE]" "%LOG%"`) do (

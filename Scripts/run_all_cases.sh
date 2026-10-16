@@ -26,6 +26,10 @@
 #   SLAB=1                require the slab decomposition (passes --slab), so a
 #                         configuration that would silently replicate fails
 #                         instead; keeps every point of a sweep in one mode
+#   PROFILE=1             per-stage step profile instead of a cost estimate:
+#                         runs ten real time steps with ALEBGK_MPI_PROFILE=1
+#                         and prints the breakdown. --estimate is not used,
+#                         since it stops at step 2 where warm-up dominates
 #   MPIRUN=/path/to/mpirun
 # =============================================================================
 set -euo pipefail
@@ -68,6 +72,14 @@ if [ "$MODE" = "estimate" ]; then
     # Either empty or exactly "--slab", so an unquoted expansion is safe.
     SLABFLAG=""
     [ -n "${SLAB:-}" ] && SLABFLAG="--slab"
+
+    # PROFILE=1 swaps the cost estimate for a short real run with per-stage
+    # timing. Ten steps is enough for the means to settle and still costs
+    # seconds at the resolutions a sweep uses.
+    if [ -n "${PROFILE:-}" ]; then
+        export ALEBGK_MPI_PROFILE=1
+        echo "Profiling mode: ten time steps per configuration, --estimate off"
+    fi
 
     LAUNCH=()
     if [ -n "$NP" ]; then
@@ -128,12 +140,33 @@ if [ "$MODE" = "estimate" ]; then
             }'
         fi
 
+        # Ten steps at the case default dt: 1e-13 in 2-D, 1e-11 in 3-D.
+        if [ -n "${PROFILE:-}" ]; then
+            [ "$dim" = 3 ] && modeargs="--tfinal 1e-10" \
+                           || modeargs="--tfinal 1e-12"
+        else
+            modeargs="--estimate 0"
+        fi
+
         if "${LAUNCH[@]}" "$BIN" "$case" --Nx "$nx" --Nv "$nv" \
-               $SLABFLAG --estimate 0 > "$log" 2>&1; then
+               $SLABFLAG $modeargs > "$log" 2>&1; then
             # Report the mode the solver actually chose, not the one predicted
             # above, so a sweep that silently changed mode is visible.
             mode="$(grep -m1 'Decomp:' "$log" || true)"
             [ -n "$mode" ] && echo "   ${mode#*Decomp: }"
+
+            if [ -n "${PROFILE:-}" ]; then
+                # Echo the profile table and record its headline rows.
+                sed -n '/=== CPU step profile/,/imbalance indicator/p' "$log" \
+                    | sed 's/^/   /'
+                exch="$(awk '/Rank exchange/{
+                           printf "exchange %.2f ms (%.2f%% of step)", $3, $5;
+                           exit}' "$log")"
+                printf '%-26s Nv=%-3s %s\n' "$tag" "$nv" \
+                    "${exch:-no profile produced}" >> "$SUMMARY"
+                return 0
+            fi
+
             line="$(grep -m1 '\[ESTIMATE\]' "$log" || true)"
             if [ -n "$line" ]; then
                 printf '%-26s Nv=%-3s %s\n' "$tag" "$nv" \
